@@ -64,6 +64,7 @@
    - Manajemen akun login pengurus.
    - Konfigurasi tarif iuran per bulan.
    - Kustomisasi kop surat, nomor surat, dan nama pejabat penandatangan.
+   - **Audit Trail & Event Log**: Catatan riwayat aktivitas login, mutasi kas, iuran, e-sensus, dan perubahan sistem, dilengkapi pencarian real-time, filter kategori/tingkat, serta tombol **Ekspor CSV**.
    - **Cadangan Data JSON**: Ekspor dan impor cadangan data sistem.
 
 ---

@@ -26,7 +26,8 @@ function setupAwal() {
     { name: 'Agenda', headers: ['ID', 'Judul', 'Tanggal', 'Jam', 'Lokasi', 'Info'] },
     { name: 'Surat', headers: ['ID', 'Nama', 'NIK', 'Alamat', 'Jenis', 'Keperluan', 'Status', 'Tanggal'] },
     { name: 'Aspirasi', headers: ['ID', 'Pelapor', 'Pesan', 'Status', 'Tanggal', 'Respon'] },
-    { name: 'Config', headers: ['Key', 'Value'] }
+    { name: 'Config', headers: ['Key', 'Value'] },
+    { name: 'Logs', headers: ['ID', 'Waktu', 'User', 'Role', 'Kategori', 'Pesan', 'Tipe'] }
   ];
 
   sheets.forEach(def => {
@@ -348,7 +349,7 @@ function doGet(e) {
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const result = {};
-    const sheetNames = ['Users', 'Warga', 'Kas', 'Iuran', 'Agenda', 'Surat', 'Aspirasi', 'Config'];
+    const sheetNames = ['Users', 'Warga', 'Kas', 'Iuran', 'Agenda', 'Surat', 'Aspirasi', 'Config', 'Logs'];
     const months = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
 
     sheetNames.forEach(name => {

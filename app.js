@@ -37,7 +37,10 @@ const VIEW_MODE_KEY = 'SATUWARGA04_VIEW_MODE';
 let currentViewMode = localStorage.getItem(VIEW_MODE_KEY) || (window.innerWidth >= 1024 ? 'desktop' : 'mobile');
 let currentUser = null; // null = Mode Warga (Akses Terbuka Tanpa Login)
 let activeTab = 'beranda';
-let adminSubTab = 'pengurus'; // 'pengurus' | 'keuangan' | 'surat' | 'sistem'
+let adminSubTab = 'pengurus'; // 'pengurus' | 'keuangan' | 'surat' | 'sistem' | 'log'
+let logSearchQuery = '';
+let logFilterKategori = 'semua';
+let logFilterTipe = 'semua';
 let modalKartuTahun = CURRENT_YEAR;
 let berandaTunggakanBulan = `${CURRENT_MONTH_NAME} ${CURRENT_YEAR}`;
 let filterTunggakanMode = 'akumulasi'; // 'akumulasi' | 'bulan_lalu' | 'perbulan'
@@ -118,6 +121,15 @@ const sampleWargaData = [
   }
 ];
 
+// Sample Event Logs Awal untuk Audit Trail Sistem
+const defaultLogsData = [
+  { id: 'LOG-105', waktu: '2026-10-24 14:35:10', user: 'Super Admin RT 04', role: 'Administrator', kategori: 'AUTH', pesan: 'Masuk ke panel pengaturan & konfigurasi super user', tipe: 'info' },
+  { id: 'LOG-104', waktu: '2026-10-24 13:20:45', user: 'H. Ahmad Sobari', role: 'Bendahara RT', kategori: 'IURAN', pesan: 'Penerimaan pembayaran iuran bulanan warga Ciskul 9 No. 14', tipe: 'success' },
+  { id: 'LOG-103', waktu: '2026-10-24 11:15:30', user: 'Siti Rahmawati', role: 'Sekretaris RT', kategori: 'WARGA', pesan: 'Pembaruan opsi nomor rumah (1-70) di direktori KK', tipe: 'info' },
+  { id: 'LOG-102', waktu: '2026-10-24 09:40:12', user: 'H. Ahmad Sobari', role: 'Bendahara RT', kategori: 'KAS', pesan: 'Pencatatan pengeluaran kas: Honor Satpam & Petugas Kebersihan', tipe: 'warning' },
+  { id: 'LOG-101', waktu: '2026-10-23 20:05:00', user: 'Super Admin RT 04', role: 'Administrator', kategori: 'SISTEM', pesan: 'Sinkronisasi database cloud Google Spreadsheet berhasil', tipe: 'success' }
+];
+
 let db = {
   users: [
     { username: 'admin', password: '123', role: 'Administrator', namaWarga: 'Super Admin RT 04' },
@@ -139,7 +151,8 @@ let db = {
   aspirasi: [
     { id: 'L01', pelapor: 'Dedi Kurniawan (Ciskul 8)', pesan: 'Lampu penerangan jalan utama dekat pos satpam nomor 2 padam sejak dua hari lalu. Mohon diganti.', status: 'Selesai', tgl: `${CURRENT_YEAR}-01-12`, respon: 'Sudah diganti dengan lampu LED 30 Watt baru oleh petugas ronda.' },
     { id: 'L02', pelapor: 'Ibu Rahma (Ciskul 9)', pesan: 'Usul perbaikan tutup selokan beton di gang belakang yang retak agar tidak membahayakan anak-anak bermain sepeda.', status: 'Diproses', tgl: `${CURRENT_YEAR}-01-18`, respon: 'Akan diagendakan penambalan semen pada saat kerja bakti tanggal 15 nanti.' }
-  ]
+  ],
+  logs: [...defaultLogsData]
 };
 
 let appConfig = {
@@ -174,6 +187,9 @@ function loadLocalStorageData() {
               w.noRumah = w.noRumah.replace(/\bCiskul 1\b/gi, 'Ciskul I');
             }
           });
+        }
+        if (!Array.isArray(db.logs) || db.logs.length === 0) {
+          db.logs = [...defaultLogsData];
         }
       }
     }
@@ -1648,6 +1664,7 @@ function handleCatatKasSubmit(e) {
   };
   db.kas.push(itemKas);
   kirimDataKeSheets('ADD_KAS', itemKas);
+  logEvent('KAS', `Input mutasi kas ${tipe}: Rp ${nominal.toLocaleString('id-ID')} (${keterangan})`, tipe === 'keluar' ? 'warning' : 'success');
 
   closeModal();
   showToast('Transaksi kas berhasil dicatat!');
@@ -1656,8 +1673,11 @@ function handleCatatKasSubmit(e) {
 }
 
 function hapusKas(id) {
+  const k = db.kas.find(x => x.id === id);
+  const infoHapus = k ? `${k.keterangan || 'Mutasi Kas'} (Rp ${Number(k.nominal || 0).toLocaleString('id-ID')})` : id;
   db.kas = db.kas.filter(k => k.id !== id);
   kirimDataKeSheets('DELETE_KAS', { id });
+  logEvent('KAS', `Hapus mutasi kas: ${infoHapus}`, 'danger');
   showToast('Transaksi kas berhasil dihapus.');
   renderApp();
 }
@@ -2178,6 +2198,7 @@ function handleCatatIuranSubmit(e) {
   };
   db.kas.push(itemKas);
   kirimDataKeSheets('ADD_KAS', itemKas);
+  logEvent('IURAN', `Penerimaan iuran warga KK ${nama} (${bulan}) Rp ${nominal.toLocaleString('id-ID')}`, 'success');
 
   closeModal();
   triggerConfetti();
@@ -2512,14 +2533,119 @@ function eksekusiResetIuran() {
 // ==========================================
 // 4. HALAMAN WARGA & e-SENSUS
 // ==========================================
-function renderWarga() {
-  const filteredWarga = db.warga.filter(w => {
-    const matchQuery = w.nama.toLowerCase().includes(wargaSearchQuery.toLowerCase()) || w.noRumah.toLowerCase().includes(wargaSearchQuery.toLowerCase());
+function getFilteredWargaList() {
+  const q = wargaSearchQuery.toLowerCase().trim();
+  const terms = q ? q.split(/\s+/).filter(Boolean) : [];
+
+  return db.warga.filter(w => {
+    const combined = `${w.nama || ''} ${w.noRumah || ''} ${w.pekerjaan || ''} ${w.status || ''} ${w.agama || ''}`.toLowerCase();
+    const matchQuery = terms.length === 0 || terms.every(term => combined.includes(term));
     const matchStatus = wargaFilterStatus === 'semua' || w.status === wargaFilterStatus;
     const matchBlok = wargaFilterBlok === 'semua' || (w.noRumah && (w.noRumah.includes(wargaFilterBlok) || (wargaFilterBlok === 'Ciskul I' && /\bCiskul 1\b/i.test(w.noRumah))));
     return matchQuery && matchStatus && matchBlok;
   });
+}
 
+function renderWargaCardsHtml(filteredList) {
+  if (!filteredList || filteredList.length === 0) {
+    return `
+      <div class="col-span-full p-8 text-center bg-white rounded-3xl border border-slate-200">
+        <i class="ph-bold ph-users-three text-3xl text-slate-300 mb-1 inline-block"></i>
+        <p class="text-xs font-bold text-slate-500">Tidak ada data warga yang sesuai dengan filter atau kata kunci.</p>
+      </div>
+    `;
+  }
+
+  return filteredList.map(w => `
+    <div class="bg-white p-4.5 rounded-3xl border border-slate-200/90 shadow-sm space-y-3 transition hover:shadow-md flex flex-col justify-between">
+      <div>
+        <div class="flex items-start justify-between">
+          <div>
+            <div class="flex items-center space-x-2">
+              <h4 class="text-xs font-black text-slate-900">${w.nama}</h4>
+              <span class="px-2 py-0.5 rounded-full text-[9px] font-black ${w.status === 'Tetap' ? 'bg-emerald-100 text-emerald-800 border border-emerald-200' : 'bg-amber-100 text-amber-800 border border-amber-200'}">
+                ${w.status}
+              </span>
+            </div>
+            <p class="text-[11px] text-slate-500 mt-0.5 flex items-center gap-2 flex-wrap">
+              <span class="flex items-center gap-1"><i class="ph-bold ph-house-line text-brand-600"></i> ${w.noRumah}</span>
+              <span>•</span>
+              <span class="flex items-center gap-1"><i class="ph-bold ph-briefcase text-slate-500"></i> ${w.pekerjaan || 'Karyawan'}</span>
+            </p>
+          </div>
+          <div class="flex items-center space-x-1 flex-shrink-0">
+            <button onclick="openModalKartuDigital('${w.id}')" title="Kartu Identitas Digital" class="p-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl transition shadow-2xs">
+              <i class="ph-bold ph-identification-card text-base"></i>
+            </button>
+            <button onclick="openModalKartuIuran('${w.nama.replace(/'/g, "\\'")}')" title="Kartu Iuran" class="p-2 bg-brand-50 hover:bg-brand-100 text-brand-700 rounded-xl transition shadow-2xs">
+              <i class="ph-bold ph-receipt text-base"></i>
+            </button>
+            ${isPengurus() ? `
+              <button onclick="openModalEditWarga('${w.id}')" title="Edit Data Warga" class="p-2 bg-amber-50 hover:bg-amber-100 text-amber-700 rounded-xl transition shadow-2xs">
+                <i class="ph-bold ph-pencil-simple text-base"></i>
+              </button>
+            ` : ''}
+            ${canManageWarga() ? `
+              <button onclick="hapusWarga('${w.id}', '${w.nama.replace(/'/g, "\\'")}')" title="Hapus Warga" class="p-2 bg-rose-50 hover:bg-rose-100 text-rose-600 rounded-xl transition shadow-2xs">
+                <i class="ph-bold ph-trash text-base"></i>
+              </button>
+            ` : ''}
+          </div>
+        </div>
+        
+        <div class="mt-3 pt-2 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-600 bg-slate-50/70 px-3 py-2 rounded-2xl border border-slate-100">
+          <div><span class="text-slate-400 font-bold">Agama:</span> <b>${w.agama || 'Islam'}</b></div>
+          <div><span class="text-slate-400 font-bold">Pekerjaan:</span> <b>${w.pekerjaan || 'Karyawan'}</b></div>
+        </div>
+      </div>
+
+      ${isPengurus() && w.telp ? `
+        <div class="pt-2 mt-2 border-t border-slate-100 flex items-center justify-between text-[11px]">
+          <span class="text-slate-600 font-semibold truncate"><i class="ph-bold ph-whatsapp-logo text-emerald-600"></i> No. WA: <b>${w.telp}</b></span>
+          <a href="https://wa.me/${w.telp.replace(/^0/, '62')}" target="_blank" class="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded-xl font-bold flex items-center gap-1 transition border border-emerald-200/60 flex-shrink-0">
+            <i class="ph-bold ph-whatsapp-logo"></i><span>Chat WA</span>
+          </a>
+        </div>
+      ` : ''}
+    </div>
+  `).join('');
+}
+
+function handleWargaSearch(val) {
+  wargaSearchQuery = val;
+  const container = document.getElementById('wargaListContainer');
+  if (container) {
+    container.innerHTML = renderWargaCardsHtml(getFilteredWargaList());
+  } else {
+    renderApp();
+  }
+  const clearBtn = document.getElementById('wargaSearchClearBtn');
+  if (clearBtn) {
+    clearBtn.classList.toggle('hidden', !val);
+  }
+}
+
+function handleWargaSearchClear() {
+  wargaSearchQuery = '';
+  const input = document.getElementById('wargaSearchInput');
+  if (input) {
+    input.value = '';
+    input.focus();
+  }
+  handleWargaSearch('');
+}
+
+function handleWargaFilterChange() {
+  const container = document.getElementById('wargaListContainer');
+  if (container) {
+    container.innerHTML = renderWargaCardsHtml(getFilteredWargaList());
+  } else {
+    renderApp();
+  }
+}
+
+function renderWarga() {
+  const filteredWarga = getFilteredWargaList();
   const totalJiwa = db.warga.reduce((a, b) => a + (Number(b.anggota) || 1), 0);
   const tetapCount = db.warga.filter(w => w.status === 'Tetap').length;
   const kontrakCount = db.warga.filter(w => w.status === 'Kontrak').length;
@@ -2587,15 +2713,18 @@ function renderWarga() {
           <div class="bg-white p-3 rounded-2xl border border-slate-200/90 shadow-sm space-y-2">
             <div class="flex items-center space-x-2 bg-slate-50 px-3 py-2 rounded-xl border border-slate-200">
               <i class="ph-bold ph-magnifying-glass text-slate-400 text-base"></i>
-              <input type="text" id="wargaSearchInput" value="${wargaSearchQuery}" oninput="wargaSearchQuery = this.value; renderApp();" placeholder="Cari nama warga atau nomor rumah..." class="w-full text-xs font-semibold focus:outline-none bg-transparent">
+              <input type="text" id="wargaSearchInput" value="${wargaSearchQuery}" oninput="handleWargaSearch(this.value)" placeholder="Cari nama warga atau nomor rumah..." class="w-full text-xs font-semibold focus:outline-none bg-transparent">
+              <button id="wargaSearchClearBtn" onclick="handleWargaSearchClear()" class="${wargaSearchQuery ? '' : 'hidden'} text-slate-400 hover:text-slate-600 p-0.5 transition" title="Hapus pencarian">
+                <i class="ph-bold ph-x-circle text-base"></i>
+              </button>
             </div>
             <div class="flex items-center space-x-2">
-              <select onchange="wargaFilterStatus = this.value; renderApp();" class="w-1/2 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 focus:outline-none">
+              <select onchange="wargaFilterStatus = this.value; handleWargaFilterChange();" class="w-1/2 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 focus:outline-none">
                 <option value="semua" ${wargaFilterStatus === 'semua' ? 'selected' : ''}>Semua Status</option>
                 <option value="Tetap" ${wargaFilterStatus === 'Tetap' ? 'selected' : ''}>Warga Tetap</option>
                 <option value="Kontrak" ${wargaFilterStatus === 'Kontrak' ? 'selected' : ''}>Warga Kontrak</option>
               </select>
-              <select onchange="wargaFilterBlok = this.value; renderApp();" class="w-1/2 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 focus:outline-none">
+              <select onchange="wargaFilterBlok = this.value; handleWargaFilterChange();" class="w-1/2 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 focus:outline-none">
                 <option value="semua" ${wargaFilterBlok === 'semua' ? 'selected' : ''}>Semua Blok</option>
                 <option value="Ciskul I" ${wargaFilterBlok === 'Ciskul I' ? 'selected' : ''}>Blok Ciskul I</option>
                 <option value="Ciskul 6" ${wargaFilterBlok === 'Ciskul 6' ? 'selected' : ''}>Blok Ciskul 6</option>
@@ -2608,65 +2737,8 @@ function renderWarga() {
           </div>
 
           <!-- List Warga Cards (Responsive Grid 1 to 3 Kolom) -->
-          <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3.5">
-            ${filteredWarga.length === 0 ? `
-              <div class="col-span-full p-8 text-center bg-white rounded-3xl border border-slate-200">
-                <i class="ph-bold ph-users-three text-3xl text-slate-300 mb-1 inline-block"></i>
-                <p class="text-xs font-bold text-slate-500">Tidak ada data warga yang sesuai dengan filter.</p>
-              </div>
-            ` : filteredWarga.map(w => `
-              <div class="bg-white p-4.5 rounded-3xl border border-slate-200/90 shadow-sm space-y-3 transition hover:shadow-md flex flex-col justify-between">
-                <div>
-                  <div class="flex items-start justify-between">
-                    <div>
-                      <div class="flex items-center space-x-2">
-                        <h4 class="text-xs font-black text-slate-900">${w.nama}</h4>
-                        <span class="px-2 py-0.5 rounded-full text-[9px] font-black ${w.status === 'Tetap' ? 'bg-emerald-100 text-emerald-800 border border-emerald-200' : 'bg-amber-100 text-amber-800 border border-amber-200'}">
-                          ${w.status}
-                        </span>
-                      </div>
-                      <p class="text-[11px] text-slate-500 mt-0.5 flex items-center gap-2 flex-wrap">
-                        <span class="flex items-center gap-1"><i class="ph-bold ph-house-line text-brand-600"></i> ${w.noRumah}</span>
-                        <span>•</span>
-                        <span class="flex items-center gap-1"><i class="ph-bold ph-briefcase text-slate-500"></i> ${w.pekerjaan || 'Karyawan'}</span>
-                      </p>
-                    </div>
-                    <div class="flex items-center space-x-1 flex-shrink-0">
-                      <button onclick="openModalKartuDigital('${w.id}')" title="Kartu Identitas Digital" class="p-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl transition shadow-2xs">
-                        <i class="ph-bold ph-identification-card text-base"></i>
-                      </button>
-                      <button onclick="openModalKartuIuran('${w.nama.replace(/'/g, "\\'")}')" title="Kartu Iuran" class="p-2 bg-brand-50 hover:bg-brand-100 text-brand-700 rounded-xl transition shadow-2xs">
-                        <i class="ph-bold ph-receipt text-base"></i>
-                      </button>
-                      ${isPengurus() ? `
-                        <button onclick="openModalEditWarga('${w.id}')" title="Edit Data Warga" class="p-2 bg-amber-50 hover:bg-amber-100 text-amber-700 rounded-xl transition shadow-2xs">
-                          <i class="ph-bold ph-pencil-simple text-base"></i>
-                        </button>
-                      ` : ''}
-                      ${canManageWarga() ? `
-                        <button onclick="hapusWarga('${w.id}', '${w.nama.replace(/'/g, "\\'")}')" title="Hapus Warga" class="p-2 bg-rose-50 hover:bg-rose-100 text-rose-600 rounded-xl transition shadow-2xs">
-                          <i class="ph-bold ph-trash text-base"></i>
-                        </button>
-                      ` : ''}
-                    </div>
-                  </div>
-                  
-                  <div class="mt-3 pt-2 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-600 bg-slate-50/70 px-3 py-2 rounded-2xl border border-slate-100">
-                    <div><span class="text-slate-400 font-bold">Agama:</span> <b>${w.agama || 'Islam'}</b></div>
-                    <div><span class="text-slate-400 font-bold">Pekerjaan:</span> <b>${w.pekerjaan || 'Karyawan'}</b></div>
-                  </div>
-                </div>
-
-                ${isPengurus() && w.telp ? `
-                  <div class="pt-2 mt-2 border-t border-slate-100 flex items-center justify-between text-[11px]">
-                    <span class="text-slate-600 font-semibold truncate"><i class="ph-bold ph-whatsapp-logo text-emerald-600"></i> No. WA: <b>${w.telp}</b></span>
-                    <a href="https://wa.me/${w.telp.replace(/^0/, '62')}" target="_blank" class="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded-xl font-bold flex items-center gap-1 transition border border-emerald-200/60 flex-shrink-0">
-                      <i class="ph-bold ph-whatsapp-logo"></i><span>Chat WA</span>
-                    </a>
-                  </div>
-                ` : ''}
-              </div>
-            `).join('')}
+          <div id="wargaListContainer" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3.5">
+            ${renderWargaCardsHtml(filteredWarga)}
           </div>
         </div>
       ` : subTabWarga === 'statistik' ? `
@@ -2726,9 +2798,9 @@ function renderWarga() {
                 </select>
               </div>
               <div>
-                <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Nomor Rumah (1-50)</label>
+                <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Nomor Rumah (1-70)</label>
                 <select id="sensusNoRumah" class="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-amber-500">
-                  ${Array.from({length: 50}, (_, i) => `<option value="No. ${i+1}" ${i === 13 ? 'selected' : ''}>No. ${i+1}</option>`).join('')}
+                  ${Array.from({length: 70}, (_, i) => `<option value="No. ${i+1}" ${i === 13 ? 'selected' : ''}>No. ${i+1}</option>`).join('')}
                 </select>
               </div>
             </div>
@@ -2865,6 +2937,7 @@ function handleSensusSubmit(e) {
 
   triggerConfetti();
   showToast(`Data e-Sensus & KK ${nama} berhasil disimpan!`);
+  logEvent('WARGA', `Pendaftaran e-Sensus KK baru: ${newWarga.nama} (${newWarga.noRumah}) - ${newWarga.anggota} Jiwa`, 'success');
   subTabWarga = 'direktori';
   renderApp();
 }
@@ -2898,8 +2971,11 @@ function hapusWarga(id, nama) {
 }
 
 function konfirmasiHapusWarga(id) {
+  const target = db.warga.find(w => w.id === id);
+  const targetName = target ? `${target.nama} (${target.noRumah})` : id;
   db.warga = db.warga.filter(w => w.id !== id);
   kirimDataKeSheets('DELETE_WARGA', { id });
+  logEvent('WARGA', `Hapus data KK: ${targetName}`, 'danger');
   closeModal();
   showToast('Data warga berhasil dihapus.');
   renderApp();
@@ -2950,9 +3026,13 @@ function openModalEditWarga(id) {
             </select>
           </div>
           <div>
-            <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Nomor Rumah (1-50)</label>
+            <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Nomor Rumah (1-70)</label>
             <select id="editWargaNo" class="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-amber-500">
-              ${Array.from({length: 50}, (_, i) => `<option value="No. ${i+1}" ${currentNo === `No. ${i+1}` ? 'selected' : ''}>No. ${i+1}</option>`).join('')}
+              ${Array.from({length: 70}, (_, i) => {
+                const numStr = `No. ${i+1}`;
+                const isSel = currentNo === numStr || parseInt(currentNo.replace(/\D/g, '')) === (i+1);
+                return `<option value="${numStr}" ${isSel ? 'selected' : ''}>${numStr}</option>`;
+              }).join('')}
             </select>
           </div>
         </div>
@@ -3072,6 +3152,7 @@ function handleEditWargaSubmit(e, id) {
     pekerjaan: w.pekerjaan
   });
 
+  logEvent('WARGA', `Koreksi data warga KK: ${w.nama} (${w.noRumah})`, 'info');
   closeModal();
   showToast(`Data warga ${namaBaru} berhasil diperbarui!`);
   renderApp();
@@ -3662,18 +3743,21 @@ function renderAdminConfig() {
         </div>
       </div>
 
-      <div class="grid grid-cols-4 gap-1.5 bg-slate-200/70 p-1.5 rounded-2xl">
-        <button onclick="adminSubTab = 'pengurus'; renderApp();" class="py-2 px-2 rounded-xl text-xs font-bold transition ${adminSubTab === 'pengurus' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'}">
+      <div class="grid grid-cols-2 sm:grid-cols-5 gap-1.5 bg-slate-200/70 p-1.5 rounded-2xl">
+        <button onclick="adminSubTab = 'pengurus'; renderApp();" class="py-2 px-1.5 rounded-xl text-xs font-bold transition ${adminSubTab === 'pengurus' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'}">
           👥 Pengurus
         </button>
-        <button onclick="adminSubTab = 'keuangan'; renderApp();" class="py-2 px-2 rounded-xl text-xs font-bold transition ${adminSubTab === 'keuangan' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'}">
+        <button onclick="adminSubTab = 'keuangan'; renderApp();" class="py-2 px-1.5 rounded-xl text-xs font-bold transition ${adminSubTab === 'keuangan' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'}">
           💰 Iuran & Kas
         </button>
-        <button onclick="adminSubTab = 'surat'; renderApp();" class="py-2 px-2 rounded-xl text-xs font-bold transition ${adminSubTab === 'surat' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'}">
+        <button onclick="adminSubTab = 'surat'; renderApp();" class="py-2 px-1.5 rounded-xl text-xs font-bold transition ${adminSubTab === 'surat' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'}">
           📜 Surat & TTD
         </button>
-        <button onclick="adminSubTab = 'sistem'; renderApp();" class="py-2 px-2 rounded-xl text-xs font-bold transition ${adminSubTab === 'sistem' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'}">
+        <button onclick="adminSubTab = 'sistem'; renderApp();" class="py-2 px-1.5 rounded-xl text-xs font-bold transition ${adminSubTab === 'sistem' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600 hover:text-slate-900'}">
           💾 Cadangan
+        </button>
+        <button onclick="adminSubTab = 'log'; renderApp();" class="py-2 px-1.5 rounded-xl text-xs font-bold transition col-span-2 sm:col-span-1 ${adminSubTab === 'log' ? 'bg-rose-600 text-white shadow-xs' : 'text-rose-700 hover:text-rose-900 font-extrabold'}">
+          📋 Event Log
         </button>
       </div>
 
@@ -3808,7 +3892,7 @@ function renderAdminConfig() {
             </div>
           </form>
         </div>
-      ` : `
+      ` : adminSubTab === 'sistem' ? `
         <!-- Kartu 1: Integrasi Google Spreadsheet Real-Time -->
         <div class="bg-white p-5 rounded-3xl border border-slate-200/90 shadow-sm space-y-4 text-left">
           <div class="flex items-center justify-between flex-wrap gap-2">
@@ -3868,7 +3952,294 @@ function renderAdminConfig() {
             </label>
           </div>
         </div>
+      ` : `
+        <!-- Event Log Audit Trail View -->
+        ${renderAdminLogView()}
       `}
+    </div>
+  `;
+}
+
+// ==========================================
+// 6B. AUDIT TRAIL & EVENT LOG SYSTEM (SUPER USER)
+// ==========================================
+function logEvent(kategori, pesan, tipe = 'info', userCustom = null) {
+  if (!Array.isArray(db.logs)) db.logs = [];
+  const now = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  const waktuStr = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+  const user = userCustom || (currentUser ? (currentUser.namaWarga || currentUser.username) : 'Warga / Tamu');
+  const role = currentUser ? (currentUser.role || 'Pengurus RT') : (userCustom ? 'Pengurus' : 'Publik');
+
+  const newLog = {
+    id: 'LOG-' + Date.now().toString().slice(-5) + Math.floor(Math.random() * 90 + 10),
+    waktu: waktuStr,
+    user: user,
+    role: role,
+    kategori: String(kategori || 'SISTEM').toUpperCase(),
+    pesan: pesan,
+    tipe: tipe || 'info'
+  };
+
+  db.logs.unshift(newLog);
+  if (db.logs.length > 300) {
+    db.logs = db.logs.slice(0, 300);
+  }
+  saveLocalStorageData();
+}
+
+function getFilteredLogs() {
+  if (!Array.isArray(db.logs)) db.logs = [];
+  const q = logSearchQuery.toLowerCase().trim();
+  const terms = q ? q.split(/\s+/).filter(Boolean) : [];
+
+  return db.logs.filter(l => {
+    const combined = `${l.id || ''} ${l.waktu || ''} ${l.user || ''} ${l.role || ''} ${l.kategori || ''} ${l.pesan || ''}`.toLowerCase();
+    const matchQuery = terms.length === 0 || terms.every(t => combined.includes(t));
+    const matchKat = logFilterKategori === 'semua' || l.kategori === logFilterKategori;
+    const matchTipe = logFilterTipe === 'semua' || l.tipe === logFilterTipe;
+    return matchQuery && matchKat && matchTipe;
+  });
+}
+
+function renderLogListHtml(logs) {
+  if (!logs || logs.length === 0) {
+    return `
+      <div class="p-8 text-center bg-white rounded-3xl border border-slate-200">
+        <i class="ph-bold ph-clipboard-text text-3xl text-slate-300 mb-1 inline-block"></i>
+        <p class="text-xs font-bold text-slate-500">Tidak ada catatan event log yang sesuai dengan filter atau kata kunci.</p>
+      </div>
+    `;
+  }
+
+  const katMeta = {
+    AUTH: { icon: 'ph-shield-check', bg: 'bg-indigo-50', color: 'text-indigo-600', badge: 'bg-indigo-100 text-indigo-800 border-indigo-200' },
+    WARGA: { icon: 'ph-users-three', bg: 'bg-amber-50', color: 'text-amber-600', badge: 'bg-amber-100 text-amber-800 border-amber-200' },
+    KAS: { icon: 'ph-wallet', bg: 'bg-emerald-50', color: 'text-emerald-600', badge: 'bg-emerald-100 text-emerald-800 border-emerald-200' },
+    IURAN: { icon: 'ph-receipt', bg: 'bg-blue-50', color: 'text-blue-600', badge: 'bg-blue-100 text-blue-800 border-blue-200' },
+    SURAT: { icon: 'ph-file-text', bg: 'bg-purple-50', color: 'text-purple-600', badge: 'bg-purple-100 text-purple-800 border-purple-200' },
+    AGENDA: { icon: 'ph-calendar-check', bg: 'bg-teal-50', color: 'text-teal-600', badge: 'bg-teal-100 text-teal-800 border-teal-200' },
+    SISTEM: { icon: 'ph-gear-six', bg: 'bg-rose-50', color: 'text-rose-600', badge: 'bg-rose-100 text-rose-800 border-rose-200' }
+  };
+
+  const tipeMeta = {
+    info: { label: 'Info', badge: 'bg-slate-100 text-slate-700 border-slate-200' },
+    success: { label: 'Sukses', badge: 'bg-emerald-100 text-emerald-800 border-emerald-200' },
+    warning: { label: 'Peringatan', badge: 'bg-amber-100 text-amber-800 border-amber-200' },
+    danger: { label: 'Kritis', badge: 'bg-rose-100 text-rose-800 border-rose-200' }
+  };
+
+  return logs.map(l => {
+    const km = katMeta[l.kategori] || { icon: 'ph-activity', bg: 'bg-slate-100', color: 'text-slate-600', badge: 'bg-slate-100 text-slate-800 border-slate-200' };
+    const tm = tipeMeta[l.tipe] || tipeMeta.info;
+
+    return `
+      <div class="bg-white p-3.5 sm:p-4 rounded-2xl border border-slate-200/90 shadow-2xs hover:shadow-sm transition flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-left">
+        <div class="flex items-start space-x-3 min-w-0 flex-1">
+          <div class="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 text-base ${km.bg} ${km.color}">
+            <i class="ph-bold ${km.icon}"></i>
+          </div>
+          <div class="min-w-0 flex-1">
+            <div class="flex items-center gap-1.5 flex-wrap">
+              <span class="text-[9px] font-black uppercase px-2 py-0.5 rounded-full border ${km.badge}">${l.kategori}</span>
+              <span class="text-[9px] font-bold px-2 py-0.5 rounded-full border ${tm.badge}">${tm.label}</span>
+              <span class="text-[10px] font-mono text-slate-400">${l.id}</span>
+            </div>
+            <p class="text-xs font-bold text-slate-800 mt-1 break-words">${l.pesan}</p>
+            <div class="flex items-center gap-2 text-[10.5px] text-slate-500 mt-1 flex-wrap">
+              <span class="flex items-center gap-1 font-semibold text-slate-700">
+                <i class="ph-bold ph-user text-slate-400"></i> ${l.user}
+              </span>
+              <span>•</span>
+              <span class="px-1.5 py-0.5 rounded text-[9.5px] bg-slate-100 text-slate-600 font-semibold">${l.role || 'Pengurus'}</span>
+              <span>•</span>
+              <span class="flex items-center gap-1 text-slate-400">
+                <i class="ph-bold ph-clock"></i> ${l.waktu} WIB
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function handleLogSearch(val) {
+  logSearchQuery = val;
+  const container = document.getElementById('logListContainer');
+  if (container) {
+    container.innerHTML = renderLogListHtml(getFilteredLogs());
+  } else {
+    renderApp();
+  }
+  const clearBtn = document.getElementById('logSearchClearBtn');
+  if (clearBtn) {
+    clearBtn.classList.toggle('hidden', !val);
+  }
+}
+
+function handleLogSearchClear() {
+  logSearchQuery = '';
+  const input = document.getElementById('logSearchInput');
+  if (input) {
+    input.value = '';
+    input.focus();
+  }
+  handleLogSearch('');
+}
+
+function handleLogFilterChange() {
+  const container = document.getElementById('logListContainer');
+  if (container) {
+    container.innerHTML = renderLogListHtml(getFilteredLogs());
+  } else {
+    renderApp();
+  }
+}
+
+function downloadLogCsv() {
+  if (!db.logs || db.logs.length === 0) {
+    showToast('Belum ada data log untuk diekspor.', 'error');
+    return;
+  }
+  const headers = ['ID Log', 'Waktu (WIB)', 'User Pelaksana', 'Role / Jabatan', 'Kategori Modul', 'Tingkat Event', 'Deskripsi Aktivitas'];
+  const rows = db.logs.map(l => [
+    `"${l.id}"`,
+    `"${l.waktu}"`,
+    `"${(l.user || '').replace(/"/g, '""')}"`,
+    `"${(l.role || '').replace(/"/g, '""')}"`,
+    `"${l.kategori}"`,
+    `"${l.tipe}"`,
+    `"${(l.pesan || '').replace(/"/g, '""')}"`
+  ]);
+  const csvContent = '\uFEFF' + [headers.join(','), ...rows.map(r => r.join(','))].join('\r\n');
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `SatuWarga04_EventLog_${new Date().toISOString().split('T')[0]}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  showToast('Event log berhasil diekspor ke file CSV!');
+}
+
+function confirmClearLogs() {
+  const html = `
+    <div class="space-y-4 text-center p-2">
+      <div class="w-12 h-12 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center mx-auto text-2xl">
+        <i class="ph-bold ph-trash"></i>
+      </div>
+      <div>
+        <h3 class="text-sm font-black text-slate-900">Bersihkan Riwayat Event Log?</h3>
+        <p class="text-xs text-slate-500 mt-1">Seluruh riwayat aktivitas event log saat ini akan dihapus dari cache lokal. Aksi ini tidak dapat dibatalkan.</p>
+      </div>
+      <div class="flex space-x-2 pt-2">
+        <button onclick="closeModal()" class="w-1/2 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold">Batal</button>
+        <button onclick="executeClearLogs()" class="w-1/2 py-2.5 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold shadow">Ya, Bersihkan</button>
+      </div>
+    </div>
+  `;
+  openModal(html);
+}
+
+function executeClearLogs() {
+  db.logs = [];
+  logEvent('SISTEM', 'Riwayat event log sebelumnya telah dibersihkan oleh Administrator', 'warning');
+  closeModal();
+  showToast('Riwayat event log berhasil dibersihkan.');
+  renderApp();
+}
+
+function renderAdminLogView() {
+  const todayStr = new Date().toISOString().split('T')[0];
+  const todayLogsCount = (db.logs || []).filter(l => l.waktu && l.waktu.startsWith(todayStr)).length;
+  const filtered = getFilteredLogs();
+
+  return `
+    <div class="space-y-4">
+      <!-- Header Info & Quick Metrics -->
+      <div class="bg-gradient-to-r from-slate-900 via-rose-950 to-slate-900 text-white p-5 rounded-3xl shadow-lg border border-rose-900/40 relative overflow-hidden">
+        <div class="relative z-10 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+          <div>
+            <div class="flex items-center space-x-2">
+              <span class="px-2.5 py-0.5 rounded-full bg-rose-500/30 text-rose-300 text-[10px] font-black uppercase tracking-wider border border-rose-500/40">Audit Trail & Security</span>
+              <span class="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+            </div>
+            <h3 class="text-base font-black mt-1 font-display">System Event & Activity Log</h3>
+            <p class="text-xs text-rose-200/80 mt-0.5">Pencatatan riwayat setiap aksi krusial pengurus, mutasi kas, e-sensus, iuran, hingga keamanan sistem.</p>
+          </div>
+          <div class="flex items-center gap-2 flex-wrap">
+            <button onclick="downloadLogCsv()" class="px-3 py-2 bg-white/10 hover:bg-white/20 text-white border border-white/20 rounded-xl text-xs font-bold transition flex items-center gap-1.5 active:scale-95 shadow-sm">
+              <i class="ph-bold ph-file-csv text-base text-emerald-300"></i>
+              <span>Ekspor CSV</span>
+            </button>
+            <button onclick="confirmClearLogs()" class="px-3 py-2 bg-rose-600/80 hover:bg-rose-600 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 active:scale-95 shadow-sm">
+              <i class="ph-bold ph-trash text-base"></i>
+              <span>Bersihkan Riwayat</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- 3 Quick Metrics -->
+        <div class="grid grid-cols-3 gap-2.5 mt-4 pt-3 border-t border-white/10">
+          <div class="bg-white/5 backdrop-blur p-2.5 rounded-2xl border border-white/10">
+            <span class="text-[10px] text-slate-300 font-semibold uppercase">Total Event</span>
+            <p class="text-lg font-black mt-0.5 text-white">${db.logs ? db.logs.length : 0}</p>
+          </div>
+          <div class="bg-white/5 backdrop-blur p-2.5 rounded-2xl border border-white/10">
+            <span class="text-[10px] text-slate-300 font-semibold uppercase">Aktivitas Hari Ini</span>
+            <p class="text-lg font-black mt-0.5 text-amber-300">${todayLogsCount}</p>
+          </div>
+          <div class="bg-white/5 backdrop-blur p-2.5 rounded-2xl border border-white/10">
+            <span class="text-[10px] text-slate-300 font-semibold uppercase">Status Keamanan</span>
+            <p class="text-lg font-black mt-0.5 text-emerald-400">Normal</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Search & Filter Card -->
+      <div class="bg-white p-3.5 rounded-2xl border border-slate-200/90 shadow-sm space-y-2.5">
+        <div class="flex items-center space-x-2 bg-slate-50 px-3 py-2 rounded-xl border border-slate-200">
+          <i class="ph-bold ph-magnifying-glass text-slate-400 text-base"></i>
+          <input type="text" id="logSearchInput" value="${logSearchQuery}" oninput="handleLogSearch(this.value)" placeholder="Cari aktivitas, nama user, waktu, atau kata kunci..." class="w-full text-xs font-semibold focus:outline-none bg-transparent">
+          <button id="logSearchClearBtn" onclick="handleLogSearchClear()" class="${logSearchQuery ? '' : 'hidden'} text-slate-400 hover:text-slate-600 p-0.5" title="Hapus pencarian">
+            <i class="ph-bold ph-x-circle text-base"></i>
+          </button>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <div>
+            <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">Filter Kategori Modul</label>
+            <select id="logFilterKategori" onchange="logFilterKategori = this.value; handleLogFilterChange();" class="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 focus:outline-none">
+              <option value="semua" ${logFilterKategori === 'semua' ? 'selected' : ''}>Semua Kategori</option>
+              <option value="AUTH" ${logFilterKategori === 'AUTH' ? 'selected' : ''}>🔐 AUTH (Login / Akses)</option>
+              <option value="WARGA" ${logFilterKategori === 'WARGA' ? 'selected' : ''}>👥 WARGA (e-Sensus & Data KK)</option>
+              <option value="KAS" ${logFilterKategori === 'KAS' ? 'selected' : ''}>💰 KAS (Pemasukan / Pengeluaran)</option>
+              <option value="IURAN" ${logFilterKategori === 'IURAN' ? 'selected' : ''}>💳 IURAN (Pembayaran / Batal)</option>
+              <option value="SURAT" ${logFilterKategori === 'SURAT' ? 'selected' : ''}>📜 SURAT (Pengantar & Format)</option>
+              <option value="SISTEM" ${logFilterKategori === 'SISTEM' ? 'selected' : ''}>⚙️ SISTEM (Config & Cadangan)</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">Filter Tingkat Event (Severity)</label>
+            <select id="logFilterTipe" onchange="logFilterTipe = this.value; handleLogFilterChange();" class="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 focus:outline-none">
+              <option value="semua" ${logFilterTipe === 'semua' ? 'selected' : ''}>Semua Tingkat</option>
+              <option value="info" ${logFilterTipe === 'info' ? 'selected' : ''}>ℹ️ Info / Normal</option>
+              <option value="success" ${logFilterTipe === 'success' ? 'selected' : ''}>✅ Berhasil (Success)</option>
+              <option value="warning" ${logFilterTipe === 'warning' ? 'selected' : ''}>⚠️ Peringatan (Warning)</option>
+              <option value="danger" ${logFilterTipe === 'danger' ? 'selected' : ''}>🛑 Kritis / Hapus (Danger)</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <!-- Log Items Container -->
+      <div id="logListContainer" class="space-y-2">
+        ${renderLogListHtml(filtered)}
+      </div>
     </div>
   `;
 }
@@ -4081,6 +4452,7 @@ function handleLoginSubmit(e) {
       role: match.role || 'Pengurus RT',
       namaWarga: match.namaWarga || match.username
     };
+    logEvent('AUTH', `Login berhasil sebagai ${currentUser.namaWarga} (${currentUser.role})`, 'success', currentUser.namaWarga);
     closeModal();
     showToast(`Berhasil masuk sebagai ${currentUser.role}!`);
     renderApp();
@@ -4161,6 +4533,9 @@ function handleGantiPasswordSubmit(e) {
 }
 
 function logout() {
+  if (currentUser) {
+    logEvent('AUTH', `User ${currentUser.namaWarga || currentUser.username} (${currentUser.role}) logout dari sistem`, 'info');
+  }
   currentUser = null;
   showToast('Anda telah keluar dari mode Pengurus.');
   renderApp();
